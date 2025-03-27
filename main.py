@@ -264,6 +264,37 @@ def get_chrome_path():
         return '/usr/bin/google-chrome'
     return None
 
+# Специальный класс для области Drag & Drop
+class DropArea(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setText("Перетащите RAR/ZIP архив или папку с ZIP/RAR файлами сессий сюда")
+        self.main_window = None
+        
+        # Проходим вверх по иерархии виджетов, чтобы найти WhatsAppSessionManager
+        widget = self
+        while widget:
+            if isinstance(widget, WhatsAppSessionManager):
+                self.main_window = widget
+                break
+            widget = widget.parent()
+        
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            logger.info("DropArea: Перетаскивание файлов/папок начато")
+            
+    def dropEvent(self, event: QDropEvent):
+        files = [url.toLocalFile() for url in event.mimeData().urls()]
+        logger.info(f"DropArea: Файлы/папки перетащены: {files}")
+        # Передаем управление основному классу, если нашли его
+        if self.main_window:
+            self.main_window.process_drop(files)
+        else:
+            logger.error("Не удалось найти главное окно для обработки перетаскиваемых файлов")
+
 class WhatsAppSessionManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -430,8 +461,7 @@ class WhatsAppSessionManager(QMainWindow):
         layout.addLayout(header_layout)
         
         # Область для drag & drop
-        self.drop_area = QLabel("Перетащите RAR/ZIP архив или папку с ZIP/RAR файлами сессий сюда")
-        self.drop_area.setAlignment(Qt.AlignCenter)
+        self.drop_area = DropArea(self)
         self.drop_area.setStyleSheet("""
             QLabel {
                 border: 2px dashed #dadce0;
@@ -448,7 +478,8 @@ class WhatsAppSessionManager(QMainWindow):
             }
         """)
         self.drop_area.setMinimumHeight(60)
-        self.drop_area.setAcceptDrops(True)
+        self.drop_area.setMaximumHeight(80)
+        
         layout.addWidget(self.drop_area)
         
         # Прогресс-бар
@@ -604,18 +635,7 @@ class WhatsAppSessionManager(QMainWindow):
         except Exception as e:
             logger.error(f"Ошибка при сохранении данных: {str(e)}")
             logger.error(traceback.format_exc())
-        
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            logger.info("Перетаскивание файлов/папок начато")
-            
-    def dropEvent(self, event: QDropEvent):
-        files = [url.toLocalFile() for url in event.mimeData().urls()]
-        logger.info(f"Файлы/папки перетащены: {files}")
-        for path in files:
-            self.process_path(path)
-            
+    
     def is_session_name(self, filename):
         """Проверяет, является ли имя файла/папки похожим на название сессии WhatsApp"""
         basename = os.path.basename(filename)
@@ -687,20 +707,44 @@ class WhatsAppSessionManager(QMainWindow):
         """Универсальный метод выбора архива или папки"""
         options = QFileDialog.Options()
         
+        # Создаем переменную для хранения пути к выбранному файлу или папке
+        selected_path = None
+        
+        # Сначала показываем диалог выбора файла
         dialog = QFileDialog(self, "Выберите архив или папку с сессиями WhatsApp")
         dialog.setFileMode(QFileDialog.AnyFile)
         dialog.setNameFilter("Архивы (*.rar *.zip *.7z);;Все файлы (*)")
         dialog.setOptions(options)
         
-        # Добавляем кнопку для выбора папки
-        folder_button = QPushButton("Выбрать папку", dialog)
-        folder_button.clicked.connect(lambda: self.select_folder_from_dialog(dialog))
-        dialog.layout().addWidget(folder_button)
+        # Добавляем кнопку для выбора папки в отдельном интерфейсе
+        dialog_layout = QVBoxLayout()
+        dialog_layout.addWidget(QLabel("Если вам нужно выбрать папку, нажмите кнопку ниже"))
+        folder_button = QPushButton("Выбрать папку")
+        folder_button.clicked.connect(dialog.reject)  # Закрываем текущий диалог
+        dialog_layout.addWidget(folder_button)
+        
+        # Поскольку мы не можем изменить layout диалога напрямую, 
+        # создаем дополнительный диалог
+        helper_dialog = QDialog(self)
+        helper_dialog.setWindowTitle("Дополнительные опции")
+        helper_dialog.setLayout(dialog_layout)
+        helper_dialog.show()
         
         if dialog.exec():
             selected_files = dialog.selectedFiles()
             if selected_files:
-                self.process_path(selected_files[0])
+                selected_path = selected_files[0]
+                helper_dialog.close()
+        else:
+            helper_dialog.close()
+            # Если пользователь отменил диалог файла или нажал кнопку "Выбрать папку"
+            folder_path = QFileDialog.getExistingDirectory(self, "Выберите папку с сессиями WhatsApp")
+            if folder_path:
+                selected_path = folder_path
+        
+        # Обрабатываем выбранный путь, если он есть
+        if selected_path:
+            self.process_path(selected_path)
     
     def select_folder_from_dialog(self, dialog):
         """Вспомогательный метод для выбора папки из диалога"""
@@ -708,7 +752,13 @@ class WhatsAppSessionManager(QMainWindow):
         folder_path = QFileDialog.getExistingDirectory(self, "Выберите папку с сессиями WhatsApp")
         if folder_path:
             self.process_path(folder_path)
-            
+    
+    def process_drop(self, files):
+        """Обработка файлов/папок, полученных через drag & drop"""
+        logger.info(f"Обработка перетащенных файлов: {files}")
+        for path in files:
+            self.process_path(path)
+    
     def process_archive(self, archive_path):
         try:
             logger.info(f"Начало обработки архива: {archive_path}")
